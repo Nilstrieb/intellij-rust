@@ -263,10 +263,15 @@ class TupleSyntheticProvider:
 
 
 def MSVCEnumSummaryProvider(valobj, _dict):
-    type_name = valobj.GetChildMemberWithName("internal").GetType().name
+    internal = valobj.GetChildMemberWithName("internal")
+    type_name = internal.GetType().name
     segments = type_name.rsplit("::", 1)
     if len(segments) > 1:
-        return segments[-1]
+        if segments[-1] != "Discriminant$":
+            return segments[-1]
+        else:
+            # Niche-layout enum without data
+            return internal.GetValue()
     else:
         return ""
 
@@ -281,11 +286,27 @@ class MSVCEnumSyntheticProvider:
         type = valobj.GetType()
         discriminant = valobj.GetChildMemberWithName("discriminant").GetValue()
 
-        for field in type.fields:
-            field_variant = field.type.name
-            if discriminant is not None and field_variant.endswith("::" + discriminant):
-                self.variant = self.valobj.GetChildMemberWithName(field.name)
-                self.size = self.variant.GetNumChildren()
+        dataful_variant = valobj.GetChildMemberWithName("dataful_variant")
+        if dataful_variant:
+            # Niche-layout enum
+            # Split from the right because type name might have templates
+            # e.g. "enum$<Foo<..., ...>>, 1, 100, Some>"
+            items = type.name.rsplit(',', 4)
+            start = int(items[-3])
+            end = int(items[-2])
+            if discriminant.isnumeric() and start <= int(discriminant) <= end:
+                self.variant = dataful_variant
+                self.size = 1
+            else:
+                self.variant = valobj.GetChildMemberWithName("discriminant")
+                self.size = 0
+        else:
+            # Directly tagged enums
+            for field in type.fields:
+                field_variant = field.type.name
+                if discriminant is not None and field_variant.endswith("::" + discriminant):
+                    self.variant = self.valobj.GetChildMemberWithName(field.name)
+                    self.size = self.variant.GetNumChildren()
 
     def num_children(self):
         # type: () -> int

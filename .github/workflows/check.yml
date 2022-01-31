@@ -76,7 +76,7 @@ jobs:
             fail-fast: ${{ fromJSON(needs.calculate-git-info.outputs.is_bors_branch) }}
             matrix:
                 os: [ ubuntu-18.04, windows-latest ]
-                rust-version: [ 1.58.1, nightly-2021-12-26 ]
+                rust-version: [ 1.58.1, nightly-2022-05-15 ]
                 base-ide: [ idea, clion ]
                 platform-version: [ 213, 221, 222 ]
                 # it's enough to verify plugin structure only once per platform version
@@ -236,6 +236,8 @@ jobs:
                   arguments: ":plugin:verifyPlugin"
 
             - name: Check bundled Rust formatters
+              # FIXME: Drop this line after fixing https://github.com/intellij-rust/intellij-rust/issues/8843
+              if: matrix.os != 'windows-latest' || !startsWith(matrix.rust-version, 'nightly')
               uses: gradle/gradle-build-action@v1
               with:
                   arguments: "runPrettyPrintersTests --no-daemon"

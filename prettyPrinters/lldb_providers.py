@@ -262,6 +262,56 @@ class TupleSyntheticProvider:
         return True
 
 
+def MSVCEnumSummaryProvider(valobj, _dict):
+    type_name = valobj.GetChildMemberWithName("internal").GetType().name
+    segments = type_name.rsplit("::", 1)
+    if len(segments) > 1:
+        return segments[-1]
+    else:
+        return ""
+
+
+class MSVCEnumSyntheticProvider:
+    def __init__(self, valobj, _dict):
+        # type: (SBValue, dict) -> None
+        self.valobj = valobj
+        self.variant = None
+        self.size = 0
+
+        type = valobj.GetType()
+        discriminant = valobj.GetChildMemberWithName("discriminant").GetValue()
+
+        for field in type.fields:
+            field_variant = field.type.name
+            if discriminant is not None and field_variant.endswith("::" + discriminant):
+                self.variant = self.valobj.GetChildMemberWithName(field.name)
+                self.size = self.variant.GetNumChildren()
+
+    def num_children(self):
+        # type: () -> int
+        return self.size
+
+    def get_child_index(self, name):
+        # type: (str) -> int
+        if name == "internal":
+            return self.size
+        return self.variant.GetIndexOfChildWithName(name)
+
+    def get_child_at_index(self, index):
+        # type: (int) -> SBValue
+        if index == self.size:
+            return self.variant
+        return self.variant.GetChildAtIndex(index)
+
+    def update(self):
+        # type: () -> None
+        pass
+
+    def has_children(self):
+        # type: () -> bool
+        return True
+
+
 class StdVecSyntheticProvider:
     """Pretty-printer for alloc::vec::Vec<T>
 

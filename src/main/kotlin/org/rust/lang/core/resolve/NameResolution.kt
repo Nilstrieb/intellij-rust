@@ -319,14 +319,19 @@ fun findDependencyCrateByName(context: RsElement, name: String): RsFile? {
     return found
 }
 
-fun processPathResolveVariants(lookup: ImplLookup?, path: RsPath, isCompletion: Boolean, processor: RsResolveProcessor): Boolean {
+fun processPathResolveVariants(
+    lookup: ImplLookup?,
+    path: RsPath,
+    isCompletion: Boolean,
+    processor: RsResolveProcessor,
+    ns: Set<Namespace> = path.allowedNamespaces(isCompletion),
+): Boolean {
     val parent = path.context
     if (parent is RsMacroCall) {
         error("Tried to use `processPathResolveVariants` for macro path. See `RsMacroPathReferenceImpl`")
     }
     val qualifier = path.qualifier
     val typeQual = path.typeQual
-    val ns = path.allowedNamespaces(isCompletion)
 
     // RsPathExpr can became a macro by adding a trailing `!`, so we add macros to completion
     if (isCompletion && parent is RsPathExpr && qualifier?.path == null) {
@@ -1843,6 +1848,7 @@ object NameResolutionTestmarks {
     object ModRsFile : Testmark()
     object SelfRelatedTypeSpecialCase : Testmark()
     object SkipAssocTypeFromImpl : Testmark()
+    object NamespaceFallback : Testmark()
 }
 
 private data class ImplicitStdlibCrate(val name: String, val crateRoot: RsFile)

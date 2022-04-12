@@ -33,6 +33,8 @@ import org.rust.lang.core.psi.*
 import org.rust.lang.core.psi.RsElementTypes.IDENTIFIER
 import org.rust.lang.core.psi.ext.*
 import org.rust.lang.core.resolve.*
+import org.rust.lang.core.resolve.ref.RsPathReference
+import org.rust.lang.core.resolve.ref.advancedDeepResolve
 import org.rust.lang.core.resolve.ref.deepResolve
 import org.rust.lang.core.types.*
 import org.rust.lang.core.types.consts.asLong
@@ -41,6 +43,7 @@ import org.rust.lang.core.types.infer.substitute
 import org.rust.lang.core.types.ty.*
 import org.rust.lang.utils.RsDiagnostic
 import org.rust.lang.utils.RsDiagnostic.IncorrectFunctionArgumentCountError.FunctionType
+import org.rust.lang.utils.RsDiagnostic.WrongPathResolutionError
 import org.rust.lang.utils.RsErrorCode
 import org.rust.lang.utils.SUPPORTED_CALLING_CONVENTIONS
 import org.rust.lang.utils.addToHolder
@@ -100,7 +103,6 @@ class RsErrorAnnotator : AnnotatorBase(), HighlightRangeExtension {
             override fun visitVariantDiscriminant(o: RsVariantDiscriminant) = collectDiagnostics(rsHolder, o)
             override fun visitPolybound(o: RsPolybound) = checkPolybound(rsHolder, o)
             override fun visitTildeConst(o: RsTildeConst) = checkTildeConst(rsHolder, o)
-            override fun visitTraitRef(o: RsTraitRef) = checkTraitRef(rsHolder, o)
             override fun visitCallExpr(o: RsCallExpr) = checkCallExpr(rsHolder, o)
             override fun visitBlockExpr(o: RsBlockExpr) = checkBlockExpr(rsHolder, o)
             override fun visitBreakExpr(o: RsBreakExpr) = checkBreakExpr(rsHolder, o)
@@ -446,13 +448,6 @@ class RsErrorAnnotator : AnnotatorBase(), HighlightRangeExtension {
         checkNotCallingDrop(o, holder)
     }
 
-    private fun checkTraitRef(holder: RsAnnotationHolder, o: RsTraitRef) {
-        val item = o.path.reference?.resolve() as? RsItemElement ?: return
-        if (item !is RsTraitItem && item !is RsTraitAlias) {
-            RsDiagnostic.NotTraitError(o, item).addToHolder(holder)
-        }
-    }
-
     private fun checkDotExpr(holder: RsAnnotationHolder, o: RsDotExpr) {
         val field = o.fieldLookup ?: o.methodCall ?: return
         checkReferenceIsPublic(field, o, holder)
@@ -487,6 +482,62 @@ class RsErrorAnnotator : AnnotatorBase(), HighlightRangeExtension {
             RsDiagnostic.ExplicitCallToDrop(identifier ?: call).addToHolder(holder)
         }
     }
+
+    private fun checkPathResolveTarget(path: RsPath, holder: RsAnnotationHolder): Boolean {
+        val reference = path.reference ?: return true
+        val resolved = reference.advancedResolve2() ?: return true
+        val resolvedElement = resolved.inner.element
+        val pathParent = path.parent
+
+        val kind = when {
+            pathParent is RsTraitRef && resolvedElement !is RsTraitItem && resolvedElement !is RsTraitAlias -> {
+                WrongPathResolutionError.Kind.Trait
+            }
+            pathParent.parent is RsPatConst && !resolvedElement.isConstantLike -> {
+                WrongPathResolutionError.Kind.Pat
+            }
+            pathParent is RsPatTupleStruct && !reference.resolvesToTupleStruct -> {
+                WrongPathResolutionError.Kind.TupleStruct
+            }
+            (pathParent is RsPatStruct || pathParent is RsStructLiteral) && !reference.resolvesToBlockFieldOrUnitStruct -> {
+                WrongPathResolutionError.Kind.Struct
+            }
+            !resolved.isCorrectNamespace -> when {
+                path.typeQual != null -> when (pathParent) {
+                    is RsTypeReference -> WrongPathResolutionError.Kind.AssociatedType
+                    else -> WrongPathResolutionError.Kind.AssociatedValue
+                }
+                pathParent is RsPathExpr -> if (pathParent.parent is RsCallExpr) {
+                    if (path.referenceName?.getOrNull(0)?.isUpperCase() == true) {
+                        WrongPathResolutionError.Kind.UppercaseCallable
+                    } else {
+                        WrongPathResolutionError.Kind.Callable
+                    }
+                } else {
+                    WrongPathResolutionError.Kind.Value
+                }
+                else -> WrongPathResolutionError.Kind.Type
+            }
+            else -> return true
+        }
+
+        val highlightedElement = path.referenceNameElement ?: return true
+
+        WrongPathResolutionError(highlightedElement, kind, resolvedElement).addToHolder(holder)
+        return false
+    }
+
+    private val RsPathReference.resolvesToBlockFieldOrUnitStruct: Boolean
+        get() {
+            val resolved = deepResolve()
+            return resolved is RsFieldsOwner && resolved.tupleFields == null
+        }
+
+    private val RsPathReference.resolvesToTupleStruct: Boolean
+        get() {
+            val resolved = advancedDeepResolve(implOnly = true)?.element
+            return resolved is RsFieldsOwner && resolved.tupleFields != null
+        }
 
     private fun checkReferenceIsPublic(ref: RsReferenceElement, o: RsElement, holder: RsAnnotationHolder) {
         // Do not annotate usages of private items in debugger
@@ -606,6 +657,7 @@ class RsErrorAnnotator : AnnotatorBase(), HighlightRangeExtension {
 
             if (function.selfParameter == null) {
                 RsDiagnostic.SelfInStaticMethodError(path, function).addToHolder(holder)
+                return
             }
         }
 
@@ -622,6 +674,7 @@ class RsErrorAnnotator : AnnotatorBase(), HighlightRangeExtension {
             }
         }
 
+        if (!checkPathResolveTarget(path, holder)) return
         checkReferenceIsPublic(path, path, holder)
         checkUnstableAttribute(path, holder)
     }

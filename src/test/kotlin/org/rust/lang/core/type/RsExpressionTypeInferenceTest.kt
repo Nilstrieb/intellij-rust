@@ -1706,4 +1706,34 @@ class RsExpressionTypeInferenceTest : RsTypificationTestBase() {
           //^ *mut i32
         }
     """)
+
+    fun `test normalizable associated type in function parameter`() = testExpr("""
+        struct S;
+        trait T { type Item; }
+        impl T for S { type Item = (u8, u8); }
+        fn foo((a, b): <S as T>::Item) {
+            a;
+        } //^ u8
+    """)
+
+    fun `test normalizable associated type in lambda parameter`() = testExpr("""
+        struct S;
+        trait T { type Item; }
+        impl T for S { type Item = (u8, u8); }
+        fn foo() {
+            let _ = |(a, b): <S as T>::Item| {
+                a;
+            };//^ u8
+        }
+    """)
+
+    fun `test normalizable associated type in cast expression`() = testExpr("""
+        struct S;
+        trait T { type Item; }
+        impl T for S { type Item = u8; }
+        fn main() {
+            let a = (1 as <S as T>::Item);
+                  //^ u8
+        }
+    """)
 }

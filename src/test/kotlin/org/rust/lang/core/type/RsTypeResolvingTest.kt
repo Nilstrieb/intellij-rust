@@ -76,7 +76,7 @@ class RsTypeResolvingTest : RsTypificationTestBase() {
 
         fn main() {
             let _: <S as T>::Assoc = S;
-                 //^ S
+                 //^ <S as T>::Assoc
         }
     """)
 
@@ -257,7 +257,7 @@ class RsTypeResolvingTest : RsTypificationTestBase() {
         impl A for S {
             type Item = S;
             fn foo(self) -> Self::Item { S }
-        }                         //^ S
+        }                         //^ <S as A>::Item
     """)
 
     fun `test inherited associated types for impl`() = testType("""
@@ -269,7 +269,7 @@ class RsTypeResolvingTest : RsTypificationTestBase() {
         impl A for S { type Item = S; }
         impl B for S {
             fn foo(self) -> Self::Item { S }
-        }                         //^ S
+        }                         //^ <S as A>::Item
     """)
 
     fun `test generic trait object`() = testType("""
@@ -519,7 +519,7 @@ class RsTypeResolvingTest : RsTypificationTestBase() {
             type f64 = ();
         }
         type A = <S as Trait>::f64;
-                             //^ ()
+                             //^ <S as Trait>::f64
     """)
 
     fun `test unresolved associated type with name f64`() = testType("""

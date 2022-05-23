@@ -173,7 +173,8 @@ class RsInferenceContext(
     fun infer(element: RsInferenceContextOwner): RsInferenceResult {
         when (element) {
             is RsFunction -> {
-                val fctx = RsTypeInferenceWalker(this, element.returnType)
+                val retTy = normalizeAssociatedTypesIn(element.returnType).value
+                val fctx = RsTypeInferenceWalker(this, retTy)
                 fctx.extractParameterBindings(element)
                 element.block?.let { fctx.inferFnBody(it) }
             }

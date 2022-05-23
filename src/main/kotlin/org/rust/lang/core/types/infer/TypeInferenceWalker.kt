@@ -576,7 +576,7 @@ class RsTypeInferenceWalker(
 
     private fun inferCastExprType(expr: RsCastExpr): Ty {
         expr.expr.inferType()
-        return expr.typeReference.type
+        return normalizeAssociatedTypesIn(expr.typeReference.type)
     }
 
     private fun inferCallExprType(expr: RsCallExpr, expected: Expectation): Ty {
@@ -1294,11 +1294,12 @@ class RsTypeInferenceWalker(
             ?: TyFunction(generateSequence { TyInfer.TyVar() }.take(params.size).toList(), TyUnknown)
         val extendedArgs = expectedFnTy.paramTypes.asSequence().infiniteWithTyUnknown()
         val paramTypes = extendedArgs.zip(params.asSequence()).map { (expectedArg, actualArg) ->
-            val paramTy = actualArg.typeReference?.type ?: expectedArg
+            val paramTy = actualArg.typeReference?.type?.let { normalizeAssociatedTypesIn(it) } ?: expectedArg
             actualArg.pat?.extractBindings(paramTy)
             paramTy
         }.toList()
         val expectedRetTy = expr.retType?.typeReference?.type
+            ?.let { normalizeAssociatedTypesIn(it) }
             ?: expectedFnTy.retType.takeIf { it != TyUnknown }
         val isFreshRetTy = expectedRetTy == null
         val retTy = expectedRetTy ?: TyInfer.TyVar()
@@ -1431,7 +1432,7 @@ class RsTypeInferenceWalker(
 
     fun extractParameterBindings(fn: RsFunction) {
         for (param in fn.valueParameters) {
-            param.pat?.extractBindings(param.typeReference?.type ?: TyUnknown)
+            param.pat?.extractBindings(param.typeReference?.type?.let { normalizeAssociatedTypesIn(it) } ?: TyUnknown)
         }
     }
 

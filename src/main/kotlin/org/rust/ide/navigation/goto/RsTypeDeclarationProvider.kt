@@ -12,6 +12,7 @@ import org.rust.lang.core.psi.ext.RsAbstractableOwner
 import org.rust.lang.core.psi.ext.RsElement
 import org.rust.lang.core.psi.ext.owner
 import org.rust.lang.core.psi.ext.parentFunction
+import org.rust.lang.core.types.implLookup
 import org.rust.lang.core.types.ty.*
 import org.rust.lang.core.types.type
 
@@ -31,7 +32,13 @@ class RsTypeDeclarationProvider : TypeDeclarationProvider {
             else -> null
         } ?: return null
 
-        val typeDeclaration = type.baseTypeDeclaration() ?: return null
+        val normType = if (type is TyProjection && element is RsElement) {
+            element.implLookup.ctx.optNormalizeProjectionType(type, 0)?.value ?: type
+        } else {
+            type
+        }
+
+        val typeDeclaration = normType.baseTypeDeclaration() ?: return null
         return arrayOf(typeDeclaration)
     }
 

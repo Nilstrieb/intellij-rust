@@ -14,6 +14,7 @@ import org.rust.ide.utils.import.RsImportHelper
 import org.rust.lang.core.parser.RustParserUtil
 import org.rust.lang.core.psi.*
 import org.rust.lang.core.psi.ext.endOffsetInParent
+import org.rust.lang.core.resolve.ref.advancedResolveTypeAliasToImpl
 import org.rust.lang.core.types.Substitution
 import org.rust.lang.core.types.implLookupAndKnownItems
 import org.rust.lang.core.types.infer.RsInferenceContext
@@ -34,7 +35,7 @@ class SubstituteTypeAliasIntention : RsElementBaseIntentionAction<SubstituteType
 
     override fun findApplicableContext(project: Project, editor: Editor, element: PsiElement): Context? {
         val path = element.parentOfType<RsPath>() ?: return null
-        val target = path.reference?.advancedResolve() ?: return null
+        val target = path.reference?.advancedResolveTypeAliasToImpl() ?: return null
 
         val typeAlias = target.element as? RsTypeAlias ?: return null
 

@@ -313,4 +313,16 @@ class CrateVersionInvalidInspectionTest : CargoTomlCrateInspectionTestBase(Crate
         "foo3" to CargoRegistryCrate.of("1.0.0"),
         "foo4" to CargoRegistryCrate.of("1.0.0"),
     )
+
+    fun `test valid version with numbers in pre-release & build sections`() = doTest("""
+        foo = { version = "0.4.0-2" }
+        bar = { version = "0.4.0-2.1" }
+        baz = { version = "0.4.0-a2.1f" }
+        qux = { version = "0.4.0-a21f+1" }
+    """,
+        "foo" to CargoRegistryCrate.of("0.4.0-2"),
+        "bar" to CargoRegistryCrate.of("0.4.0-2.1"),
+        "baz" to CargoRegistryCrate.of("0.4.0-a2.1f"),
+        "qux" to CargoRegistryCrate.of("0.4.0-a21f+1")
+    )
 }

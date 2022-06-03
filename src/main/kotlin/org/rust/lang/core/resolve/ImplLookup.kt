@@ -30,6 +30,7 @@ import org.rust.lang.utils.CargoProjectCache
 import org.rust.openapiext.testAssert
 import org.rust.stdext.Cache
 import org.rust.stdext.buildList
+import org.rust.stdext.exhaustive
 import kotlin.LazyThreadSafetyMode.NONE
 import kotlin.LazyThreadSafetyMode.PUBLICATION
 
@@ -224,7 +225,8 @@ data class ParamEnv(val callerBounds: List<TraitRef>) {
                         else -> Unit
                     }
                 }
-            }
+            }.flatMap { ref -> ref.trait.flattenHierarchy.map { TraitRef(ref.selfTy, it) } }
+                .distinct()
 
             when (rawBounds.size) {
                 0 -> return EMPTY
@@ -301,7 +303,7 @@ class ImplLookup(
             @Suppress("DEPRECATION")
             return ty.getTraitBoundsTransitively().asSequence()
         }
-        return paramEnv.boundsFor(ty).flatMap { it.flattenHierarchy.asSequence() }
+        return paramEnv.boundsFor(ty)
     }
 
     /** Resulting sequence is ordered: inherent impls are placed to the head */
@@ -592,7 +594,12 @@ class ImplLookup(
             return SelectionResult.Ambiguous
         }
 
-        val candidates = assembleCandidates(ref)
+        val candidateSet = assembleCandidates(ref)
+
+        if (candidateSet.ambiguous) {
+            return SelectionResult.Ambiguous
+        }
+        val candidates = candidateSet.list
 
         return when (candidates.size) {
             0 -> SelectionResult.Err
@@ -653,56 +660,124 @@ class ImplLookup(
         }
     }
 
-    private fun assembleCandidates(ref: TraitRef): List<SelectionCandidate> {
-        val element = ref.trait.element
-        return when {
-            // The `Sized` trait is hardcoded in the compiler. It cannot be implemented in source code.
-            // Trying to do so would result in a E0322.
-            element == items.Sized -> sizedTraitCandidates(ref.selfTy, element)
-            element == items.Destruct -> listOf(SelectionCandidate.TypeParameter(BoundElement(element)))
-            element == items.Unsize -> unsizeTraitCandidates(ref)
-            ref.selfTy is TyAnon -> buildList {
-                ref.selfTy.getTraitBoundsTransitively().find { it.element == element }
-                    ?.let { add(SelectionCandidate.TraitObject) }
+    // https://github.com/rust-lang/rust/blob/3a90bedb332d/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs#L242
+    private fun assembleCandidates(ref: TraitRef): SelectionCandidateSet {
+        val candidates = SelectionCandidateSet()
+        val trait = ref.trait.element
+        when {
+            trait == items.Sized -> assembleBuiltinBoundCandidates(sizedConditions(ref), candidates)
+            trait == items.Unsize -> assembleCandidatesForUnsizing(ref, candidates)
+            trait == items.Destruct -> candidates.list.add(SelectionCandidate.ParamCandidate(BoundElement(trait)))
+            ref.selfTy is TyAnon -> {
+                ref.selfTy.getTraitBoundsTransitively().find { it.element == trait }
+                    ?.let { candidates.list.add(SelectionCandidate.TraitObject) }
                 RsImplIndex.findFreeImpls(project) {
-                    it.trySelectCandidate(ref)?.let(::add)
+                    it.trySelectCandidate(ref)?.let(candidates.list::add)
                     false
                 }
             }
-            element.isAuto -> autoTraitCandidates(ref.selfTy, element)
-            else -> buildList {
-                getEnvBoundTransitivelyFor(ref.selfTy).asSequence()
-                    .filter { ctx.probe { ctx.combineBoundElements(it, ref.trait) } }
-                    .map { SelectionCandidate.TypeParameter(it) }
-                    .forEach(::add)
-
-                if (ref.selfTy is TyProjection) {
-                    val subst = ref.selfTy.trait.subst + mapOf(TyTypeParameter.self() to ref.selfTy.type).toTypeSubst()
-                    ref.selfTy.trait.element.bounds.asSequence()
-                        .filter { ctx.probe { ctx.combineTypes(it.selfTy.substitute(subst), ref.selfTy) }.isOk }
-                        .flatMap { it.trait.flattenHierarchy.asSequence() }
-                        .distinct()
-                        .filter { ctx.probe { ctx.combineBoundElements(it.substitute(subst), ref.trait) } }
-                        .forEach { add(SelectionCandidate.Projection(TraitRef(ref.selfTy, it))) }
-                    return@buildList
-                }
-                assembleImplCandidates(ref) { add(it); false }
-                addAll(assembleDerivedCandidates(ref))
-                if (ref.selfTy is TyTraitObject) {
-                    ref.selfTy.getTraitBoundsTransitively().find { it.element == ref.trait.element }
-                        ?.let { add(SelectionCandidate.TraitObject) }
-                }
-                getHardcodedImpls(ref.selfTy).filter { be ->
-                    be.element == element && ctx.probe {
-                        ctx.combineTypePairs(be.subst.zipTypeValues(ref.trait.subst)).isOk &&
-                            ctx.combineConstPairs(be.subst.zipConstValues(ref.trait.subst)).isOk
-                    }
-                }.forEach { _ -> add(SelectionCandidate.HardcodedImpl) }
+            else -> {
+                assembleDerivedCandidates(ref, candidates)
+                assembleHardcodedCandidates(ref, candidates)
+                assembleCandidatesFromImpls(ref, candidates)
+                assembleCandidatesFromObjectTy(ref, candidates)
             }
+        }
+
+        assembleCandidatesFromProjectedTys(ref, candidates)
+        assembleCandidatesFromCallerBounds(ref, candidates)
+
+        // Auto implementations have lower priority, so we only
+        // consider triggering a default if there is no other impl that can apply.
+        if (candidates.list.isEmpty() && trait.isAuto) {
+            assembleCandidatesFromAutoImpls(ref, candidates)
+        }
+
+        return candidates
+    }
+
+    private fun assembleBuiltinBoundCandidates(conditions: BuiltinImplConditions, candidates: SelectionCandidateSet) {
+        when (conditions) {
+            is BuiltinImplConditions.Where -> {
+                candidates.list += SelectionCandidate.BuiltinCandidate(hasNested = conditions.nested.isNotEmpty())
+            }
+            BuiltinImplConditions.None -> Unit
+            BuiltinImplConditions.Ambiguous -> candidates.ambiguous = true
+        }.exhaustive
+    }
+
+    /** See `org.rust.lang.core.type.RsImplicitTraitsTest` */
+    private fun sizedConditions(ref: TraitRef): BuiltinImplConditions {
+        return when (val selfTy = ref.selfTy) {
+            is TyInfer.IntVar,
+            is TyInfer.FloatVar,
+            is TyNumeric,
+            is TyBool,
+            is TyFunction,
+            is TyPointer,
+            is TyReference,
+            is TyChar,
+            is TyArray,
+            TyNever,
+            is TyUnit,
+            is TyUnknown -> BuiltinImplConditions.Where(emptyList())
+
+            is TyStr, is TySlice, is TyTraitObject /*is TyForeign*/ -> BuiltinImplConditions.None
+
+            is TyTuple -> BuiltinImplConditions.Where(listOf(selfTy.types.last()))
+
+            is TyAdt -> BuiltinImplConditions.Where(listOfNotNull(selfTy.structTail()))
+
+            is TyProjection, is TyTypeParameter, is TyAnon -> BuiltinImplConditions.None
+
+            is TyInfer.TyVar -> BuiltinImplConditions.Ambiguous
+
+            else -> BuiltinImplConditions.None
         }
     }
 
-    private fun assembleImplCandidates(ref: TraitRef, processor: RsProcessor<SelectionCandidate>): Boolean {
+    private fun assembleHardcodedCandidates(ref: TraitRef, candidates: SelectionCandidateSet) {
+        val element = ref.trait.element
+        getHardcodedImpls(ref.selfTy).filter { be ->
+            be.element == element && ctx.probe {
+                ctx.combineTypePairs(be.subst.zipTypeValues(ref.trait.subst)).isOk &&
+                    ctx.combineConstPairs(be.subst.zipConstValues(ref.trait.subst)).isOk
+            }
+        }.mapTo(candidates.list) { SelectionCandidate.HardcodedImpl }
+    }
+
+    private fun assembleCandidatesFromObjectTy(ref: TraitRef, candidates: SelectionCandidateSet) {
+        if (ref.selfTy is TyTraitObject) {
+            ref.selfTy.getTraitBoundsTransitively().find { it.element == ref.trait.element }
+                ?.let { candidates.list.add(SelectionCandidate.TraitObject) }
+        }
+    }
+
+    private fun assembleCandidatesFromProjectedTys(ref: TraitRef, candidates: SelectionCandidateSet) {
+        val selfTy = ref.selfTy as? TyProjection ?: return
+        val subst = selfTy.trait.subst + mapOf(TyTypeParameter.self() to selfTy.type).toTypeSubst()
+        selfTy.trait.element.bounds.asSequence()
+            .filter { ctx.probe { ctx.combineTypes(it.selfTy.substitute(subst), ref.selfTy) }.isOk }
+            .flatMap { it.trait.flattenHierarchy.asSequence() }
+            .distinct()
+            .filter { ctx.probe { ctx.combineBoundElements(it.substitute(subst), ref.trait) } }
+            .forEach { candidates.list.add(SelectionCandidate.Projection(TraitRef(ref.selfTy, it))) }
+    }
+
+    private fun assembleCandidatesFromCallerBounds(ref: TraitRef, candidates: SelectionCandidateSet) {
+        getEnvBoundTransitivelyFor(ref.selfTy)
+            .filter { ctx.probe { ctx.combineBoundElements(it, ref.trait) } }
+            .mapTo(candidates.list) { SelectionCandidate.ParamCandidate(it) }
+    }
+
+    private fun assembleCandidatesFromImpls(ref: TraitRef, candidates: SelectionCandidateSet) {
+        assembleCandidatesFromImpls(ref) {
+            candidates.list += it
+            false
+        }
+    }
+
+    private fun assembleCandidatesFromImpls(ref: TraitRef, processor: RsProcessor<SelectionCandidate>): Boolean {
         return processTyFingerprintsWithAliases(ref.selfTy) { tyFingerprint ->
             assembleImplCandidatesWithoutAliases(ref, tyFingerprint, processor)
         }
@@ -728,92 +803,50 @@ class ImplLookup(
         return SelectionCandidate.Impl(impl, formalSelfTy, formalTraitRef)
     }
 
-    private fun assembleDerivedCandidates(ref: TraitRef): List<SelectionCandidate> {
-        return (ref.selfTy as? TyAdt)?.item?.derivedTraits.orEmpty()
+    private fun assembleDerivedCandidates(ref: TraitRef, candidates: SelectionCandidateSet) {
+        (ref.selfTy as? TyAdt)?.item?.derivedTraits.orEmpty()
             // select only std traits because we are sure
             // that they are resolved correctly
             .filter { it.isKnownDerivable }
             .filter { it == ref.trait.element }
-            .map { SelectionCandidate.DerivedTrait(it) }
-    }
-
-    private fun sizedTraitCandidates(ty: Ty, sizedTrait: RsTraitItem): List<SelectionCandidate> {
-        val candidate = SelectionCandidate.TypeParameter(BoundElement(sizedTrait))
-        if (!isSizedTypeImpl(ty)) return emptyList()
-        return listOf(candidate)
+            .mapTo(candidates.list) { SelectionCandidate.DerivedTrait(it) }
     }
 
     // Mirrors rustc's `assemble_candidates_for_unsizing`
     // https://github.com/rust-lang/rust/blob/97d48bec2d/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs#L741
-    private fun unsizeTraitCandidates(ref: TraitRef): List<SelectionCandidate> {
+    private fun assembleCandidatesForUnsizing(ref: TraitRef, candidates: SelectionCandidateSet) {
         val source = ref.selfTy
         val target = ref.trait.singleParamValue
-        return when {
+        when {
             // Trait+Kx+'a -> Trait+Ky+'b (upcasts)
             source is TyTraitObject && target is TyTraitObject -> {
-                listOf(SelectionCandidate.BuiltinUnsizeCandidate) // TODO
+                candidates.list += SelectionCandidate.BuiltinUnsizeCandidate // TODO
             }
 
             // `T` -> `Trait`
-            target is TyTraitObject -> listOf(SelectionCandidate.BuiltinUnsizeCandidate)
+            target is TyTraitObject -> candidates.list += SelectionCandidate.BuiltinUnsizeCandidate
+
+            source is TyInfer.TyVar || target is TyInfer.TyVar -> {
+                candidates.ambiguous = true
+            }
 
             // `[T; n]` -> `[T]`
-            source is TyArray && target is TySlice -> listOf(SelectionCandidate.BuiltinUnsizeCandidate)
+            source is TyArray && target is TySlice -> candidates.list += SelectionCandidate.BuiltinUnsizeCandidate
 
             // `Struct<T>` -> `Struct<U>`
             source is TyAdt && target is TyAdt && source.item == target.item && source.item is RsStructItem
-                && source.item.kind == RsStructKind.STRUCT -> listOf(SelectionCandidate.BuiltinUnsizeCandidate)
+                && source.item.kind == RsStructKind.STRUCT -> candidates.list += SelectionCandidate.BuiltinUnsizeCandidate
 
             // `(.., T)` -> `(.., U)`
             source is TyTuple && target is TyTuple && source.types.size == target.types.size ->
-                listOf(SelectionCandidate.BuiltinUnsizeCandidate)
-
-            else -> emptyList()
+                candidates.list += SelectionCandidate.BuiltinUnsizeCandidate
         }
     }
 
-    /** See `org.rust.lang.core.type.RsImplicitTraitsTest` */
-    private fun isSizedTypeImpl(ty: Ty): Boolean {
-        val ancestors = mutableSetOf(ty)
-
-        fun Ty.isSizedInner(): Boolean {
-            return when (this) {
-                is TyNumeric,
-                is TyBool,
-                is TyChar,
-                is TyUnit,
-                is TyNever,
-                is TyReference,
-                is TyPointer,
-                is TyArray,
-                is TyFunction -> true
-
-                is TyStr, is TySlice, is TyTraitObject -> false
-
-                is TyTypeParameter -> getEnvBoundTransitivelyFor(this).any { it.element == items.Sized }
-
-                is TyAdt -> {
-                    val item = item as? RsStructItem ?: return true
-                    val typeRef = item.fields.lastOrNull()?.typeReference
-                    val type = typeRef?.type?.substitute(typeParameterValues) ?: return true
-                    if (!ancestors.add(type)) return true
-                    type.isSizedInner()
-                }
-
-                is TyTuple -> types.last().isSizedInner()
-
-                else -> true
-            }
-        }
-
-        return ty.isSizedInner()
-    }
-
-    @Suppress("UNUSED_PARAMETER")
-    private fun autoTraitCandidates(ty: Ty, trait: RsTraitItem): List<SelectionCandidate> {
-        // FOr now, just think that any type is Sync + Send
+    private fun assembleCandidatesFromAutoImpls(ref: TraitRef, candidates: SelectionCandidateSet) {
+        // For now, just think that any type is Sync + Send
         // TODO implement auto trait logic
-        return listOf(SelectionCandidate.TypeParameter(BoundElement(trait)))
+        candidates.list += SelectionCandidate.ParamCandidate(BoundElement(ref.trait.element))
     }
 
     private fun confirmCandidate(
@@ -823,6 +856,7 @@ class ImplLookup(
     ): SelectionResult<Selection> {
         val newRecDepth = recursionDepth + 1
         return when (candidate) {
+            is SelectionCandidate.BuiltinCandidate -> confirmBuiltinCandidate(ref, recursionDepth, candidate.hasNested)
             is SelectionCandidate.Impl -> {
                 testAssert { !candidate.formalSelfTy.containsTyOfClass(TyInfer::class.java) }
                 testAssert { !candidate.formalTrait.containsTyOfClass(TyInfer::class.java) }
@@ -845,7 +879,7 @@ class ImplLookup(
                 }
                 SelectionResult.Ok(Selection(candidate.item, obligations))
             }
-            is SelectionCandidate.TypeParameter -> {
+            is SelectionCandidate.ParamCandidate -> {
                 testAssert { !candidate.bound.containsTyOfClass(TyInfer::class.java) }
                 ctx.combineBoundElements(candidate.bound, ref.trait)
                 SelectionResult.Ok(Selection(candidate.bound.element, emptyList()))
@@ -879,6 +913,36 @@ class ImplLookup(
                 val obligations = getHardcodedImplPredicates(ref.selfTy, impl).map { Obligation(newRecDepth, it) }
                 SelectionResult.Ok(Selection(impl.element, obligations, mapOf(TyTypeParameter.self() to ref.selfTy).toTypeSubst()))
             }
+        }
+    }
+
+    private fun confirmBuiltinCandidate(
+        ref: TraitRef,
+        recursionDepth: Int,
+        hasNested: Boolean,
+    ): SelectionResult<Selection> {
+        val trait = ref.trait.element
+        val obligations = if (hasNested) {
+            val conditions = if (trait == items.Sized) {
+                sizedConditions(ref)
+            } else {
+                error("unexpected builtin trait $trait")
+            } as? BuiltinImplConditions.Where ?: error("obligation $ref had matched a builtin impl but now doesn't")
+            collectPredicatesForTypes(recursionDepth + 1, trait, conditions.nested)
+        } else {
+            emptyList()
+        }
+        return SelectionResult.Ok(Selection(trait, obligations))
+    }
+
+    private fun collectPredicatesForTypes(
+        recursionDepth: Int,
+        trait: RsTraitItem,
+        types: List<Ty>
+    ) : List<Obligation> {
+        return types.flatMap {
+            val (normTy, obligations) = ctx.normalizeAssociatedTypesIn(it, recursionDepth)
+            obligations + listOf(Obligation(recursionDepth, Predicate.Trait(TraitRef(normTy, trait.withSubst()))))
         }
     }
 
@@ -1217,6 +1281,11 @@ class ImplLookup(
     }
 }
 
+private class SelectionCandidateSet(
+    val list: MutableList<SelectionCandidate> = mutableListOf(),
+    var ambiguous: Boolean = false,
+)
+
 sealed class SelectionResult<out T> {
     object Err : SelectionResult<Nothing>()
     object Ambiguous : SelectionResult<Nothing>()
@@ -1248,6 +1317,13 @@ data class Selection(
 )
 
 private sealed class SelectionCandidate {
+    data class BuiltinCandidate(
+        /** `false` if there are no *further* obligations */
+        val hasNested: Boolean
+    ) : SelectionCandidate()
+
+    data class ParamCandidate(val bound: BoundElement<RsTraitItem>) : SelectionCandidate()
+
     /**
      * ```
      * impl<A, B> Foo<A> for Bar<B> {}
@@ -1269,7 +1345,6 @@ private sealed class SelectionCandidate {
     }
 
     data class DerivedTrait(val item: RsTraitItem) : SelectionCandidate()
-    data class TypeParameter(val bound: BoundElement<RsTraitItem>) : SelectionCandidate()
     object TraitObject : SelectionCandidate()
     object BuiltinUnsizeCandidate : SelectionCandidate()
 
@@ -1277,6 +1352,18 @@ private sealed class SelectionCandidate {
     object HardcodedImpl : SelectionCandidate()
 
     class Projection(val bound: TraitRef) : SelectionCandidate()
+}
+
+/** When does the builtin impl for `T: Trait` apply? */
+private sealed class BuiltinImplConditions {
+    /** The impl is conditional on `T1, T2, ...: Trait` */
+    data class Where(val nested: List<Ty>) : BuiltinImplConditions()
+
+    /** There is no built-in impl. There may be some other candidate (a where-clause or user-defined impl) */
+    object None : BuiltinImplConditions()
+
+    /** It is unknown whether there is an impl */
+    object Ambiguous : BuiltinImplConditions()
 }
 
 private fun prepareSubstAndTraitRefRaw(

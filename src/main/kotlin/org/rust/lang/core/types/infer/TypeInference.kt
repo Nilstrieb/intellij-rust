@@ -30,7 +30,7 @@ import org.rust.stdext.RsResult
 import org.rust.stdext.RsResult.Err
 import org.rust.stdext.RsResult.Ok
 import org.rust.stdext.dequeOf
-import org.rust.stdext.mapToSet
+import org.rust.stdext.mapNotNullToSet
 import org.rust.stdext.zipValues
 
 fun inferTypesIn(element: RsInferenceContextOwner): RsInferenceResult {
@@ -1060,7 +1060,7 @@ val RsGenericDeclaration.predicates: List<Predicate>
 private fun RsGenericDeclaration.doGetPredicates(): List<Predicate> {
     val whereBounds = whereClause?.wherePredList.orEmpty().asSequence()
         .flatMap {
-            val selfTy = it.typeReference?.type ?: return@flatMap emptySequence<Predicate>()
+            val selfTy = it.typeReference?.type ?: return@flatMap emptySequence<PsiPredicate>()
             it.typeParamBounds?.polyboundList.toPredicates(selfTy)
         }
     val bounds = typeParameters.asSequence().flatMap {
@@ -1073,10 +1073,19 @@ private fun RsGenericDeclaration.doGetPredicates(): List<Predicate> {
         emptySequence()
     }
     val explicitPredicates = (bounds + whereBounds + assocTypeBounds).toList()
-    val unbounds = explicitPredicates.filterIsInstance<PsiPredicate.Unbound>().mapToSet { it.selfTy }
     val sized = knownItems.Sized
     val implicitPredicates = if (sized != null) {
-        generics.filter { it !in unbounds }.map { Predicate.Trait(TraitRef(it, sized.withSubst())) }
+        val sizedBounds = explicitPredicates.mapNotNullToSet {
+            when (it) {
+                is PsiPredicate.Unbound -> it.selfTy
+                is PsiPredicate.Bound -> if (it.predicate is Predicate.Trait && it.predicate.trait.trait.element == sized) {
+                    it.predicate.trait.selfTy
+                } else {
+                    null
+                }
+            }
+        }
+        generics.filter { it !in sizedBounds }.map { Predicate.Trait(TraitRef(it, sized.withSubst())) }
     } else {
         emptyList()
     }

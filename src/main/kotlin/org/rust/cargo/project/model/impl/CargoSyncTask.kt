@@ -29,6 +29,7 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
 import com.intellij.util.io.exists
+import com.intellij.util.messages.Topic
 import com.intellij.util.text.SemVer
 import org.rust.RsTask
 import org.rust.cargo.CargoConfig
@@ -73,11 +74,11 @@ class CargoSyncTask(
         LOG.info("CargoSyncTask started")
         indicator.isIndeterminate = true
 
-        val syncProgress = SyncViewManager.createBuildProgress(project)
+        val syncProgress = createSyncProgress()
 
         val refreshedProjects = try {
             syncProgress.start(createSyncProgressDescriptor(indicator))
-            val refreshedProjects = doRun(indicator, syncProgress)
+            val refreshedProjects = doRun(indicator, syncProgress.progress)
             val isUpdateFailed = refreshedProjects.any { it.mergedStatus is CargoProject.UpdateStatus.UpdateFailed }
             if (isUpdateFailed) {
                 syncProgress.fail()
@@ -95,6 +96,12 @@ class CargoSyncTask(
             throw e
         }
         result.complete(refreshedProjects)
+    }
+
+    private fun createSyncProgress(): SyncProgress {
+        val publisher = project.messageBus.syncPublisher(CARGO_SYNC_TASK_TOPIC)
+        val syncProgress = SyncViewManager.createBuildProgress(project)
+        return SyncProgress(syncProgress, publisher)
     }
 
     private fun doRun(
@@ -154,7 +161,45 @@ class CargoSyncTask(
 
     companion object {
         private val LOG = logger<CargoSyncTask>()
+
+        val CARGO_SYNC_TASK_TOPIC: Topic<CargoSyncTaskListener> = Topic(
+            CargoSyncTaskListener::class.java
+        )
     }
+
+    interface CargoSyncTaskListener {
+        fun onUpdateStarted()
+        fun onUpdateFinished(result: SyncTaskResult)
+    }
+
+    enum class SyncTaskResult {
+        SUCCESS,
+        FAILURE,
+        CANCEL
+    }
+
+    private class SyncProgress(
+        val progress: BuildProgress<BuildProgressDescriptor>,
+        private val publisher: CargoSyncTaskListener
+    ) {
+        fun start(descriptor: BuildProgressDescriptor) {
+            progress.start(descriptor)
+            publisher.onUpdateStarted()
+        }
+        fun finish() {
+            progress.finish()
+            publisher.onUpdateFinished(SyncTaskResult.SUCCESS)
+        }
+        fun fail() {
+            progress.fail()
+            publisher.onUpdateFinished(SyncTaskResult.FAILURE)
+        }
+        fun cancel() {
+            progress.cancel()
+            publisher.onUpdateFinished(SyncTaskResult.CANCEL)
+        }
+    }
+
 
     private class StopAction(private val progress: ProgressIndicator) :
         DumbAwareAction({ "Stop" }, AllIcons.Actions.Suspend) {

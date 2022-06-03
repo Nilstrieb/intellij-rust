@@ -69,20 +69,8 @@ class CargoTomlWatcher(
             return when {
                 event.pathEndsWith(CargoConstants.MANIFEST_FILE) -> true
                 event.pathEndsWith(CargoConstants.LOCK_FILE) -> {
-                    val projectDir = Paths.get(event.path).parent
-                    val timestamp = CargoEventService.getInstance(project).extractTimestamp(projectDir) ?: 0
                     // Non-null requestor means a change from IDE itself
-                    if (event.requestor != null) return true
-                    val current = System.currentTimeMillis()
-                    val delayThreshold = Registry.intValue("org.rust.cargo.lock.update.delay.threshold")
-                    val delay = current - timestamp
-                    return if (delay > delayThreshold) {
-                        LOG.info("External change in ${event.path}. Previous Cargo metadata call was $delay ms before")
-                        true
-                    } else {
-                        LOG.info("Skip external change for ${event.path}. Previous Cargo metadata call was $delay ms before")
-                        false
-                    }
+                    isInterestingCargoLockChange(project, event.path, event.requestor != null)
                 }
                 event is VFileContentChangeEvent -> false
                 !event.pathEndsWith(".rs") -> false
@@ -93,6 +81,22 @@ class CargoTomlWatcher(
                     val grandParent = PathUtil.getParentPath(parent)
                     IMPLICIT_TARGET_DIRS.any { parent.endsWith(it) || (event.pathEndsWith(MAIN_RS_FILE) && grandParent.endsWith(it)) }
                 }
+            }
+        }
+
+        fun isInterestingCargoLockChange(project: Project, path: String, internalChange: Boolean): Boolean {
+            if (internalChange) return true
+            val projectDir = Paths.get(path).parent
+            val timestamp = CargoEventService.getInstance(project).extractTimestamp(projectDir) ?: 0
+            val current = System.currentTimeMillis()
+            val delayThreshold = Registry.intValue("org.rust.cargo.lock.update.delay.threshold")
+            val delay = current - timestamp
+            return if (delay > delayThreshold) {
+                LOG.info("External change in ${path}. Previous Cargo metadata call was $delay ms before")
+                true
+            } else {
+                LOG.info("Skip external change for ${path}. Previous Cargo metadata call was $delay ms before")
+                false
             }
         }
 

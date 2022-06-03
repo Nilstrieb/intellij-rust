@@ -14,6 +14,8 @@ import com.intellij.openapi.application.invokeAndWaitIfNeeded
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.application.runWriteAction
 import com.intellij.openapi.components.*
+import com.intellij.openapi.externalSystem.autoimport.AutoImportProjectTracker
+import com.intellij.openapi.externalSystem.autoimport.ExternalSystemProjectTracker
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleUtilCore
@@ -80,21 +82,15 @@ open class CargoProjectsServiceImpl(
     final override val project: Project
 ) : CargoProjectsService, PersistentStateComponent<Element>, Disposable {
     init {
-        with(project.messageBus.connect()) {
-            if (!isUnitTestMode) {
-                subscribe(VirtualFileManager.VFS_CHANGES, CargoTomlWatcher(this@CargoProjectsServiceImpl, fun() {
-                    if (!project.rustSettings.autoUpdateEnabled) return
-                    refreshAllProjects()
-                }))
-            }
+        registerProjectAware(project, this)
 
-            subscribe(RustProjectSettingsService.RUST_SETTINGS_TOPIC, object : RustSettingsListener {
-                override fun rustSettingsChanged(e: RustSettingsChangedEvent) {
-                    if (e.affectsCargoMetadata) {
-                        refreshAllProjects()
-                    }
-                }
-            })
+        with(project.messageBus.connect()) {
+//            if (!isUnitTestMode) {
+//                subscribe(VirtualFileManager.VFS_CHANGES, CargoTomlWatcher(this@CargoProjectsServiceImpl, fun() {
+//                    if (!project.rustSettings.autoUpdateEnabled) return
+//                    refreshAllProjects()
+//                }))
+//            }
 
             subscribe(CargoProjectsService.CARGO_PROJECTS_TOPIC, CargoProjectsListener { _, _ ->
                 StartupManager.getInstance(project).runAfterOpened {
